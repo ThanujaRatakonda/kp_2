@@ -1,3 +1,48 @@
+
+# StorageClass
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: backend-local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+
+---
+# Persistent Volume
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: backend-pv
+spec:
+  capacity:
+    storage: 1Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: backend-local-storage
+  hostPath:
+    path: /data/backend
+    type: DirectoryOrCreate
+
+---
+# Persistent Volume Claim
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-pvc
+spec:
+  storageClassName: backend-local-storage
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+# Backend Deployment
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,7 +59,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: 10.131.103.92:8090/kp2/backend:__IMAGE_TAG__
+          image: thanujaratakonda/backend:10
           ports:
             - containerPort: 5000
           env:
@@ -26,7 +71,18 @@ spec:
               value: "admin"
             - name: DB_PASSWORD
               value: "admin"
+          volumeMounts:
+            - name: backend-storage
+              mountPath: /app/data   # Data stored here inside container
+
+      volumes:
+        - name: backend-storage
+          persistentVolumeClaim:
+            claimName: backend-pvc
+
 ---
+# Backend Service
+
 apiVersion: v1
 kind: Service
 metadata:
