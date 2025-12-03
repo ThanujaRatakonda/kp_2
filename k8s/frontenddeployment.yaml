@@ -66,6 +66,8 @@ spec:
           volumeMounts:
             - name: frontend-storage
               mountPath: /app/data
+      imagePullSecrets:
+        - name:  regcred
       volumes:
         - name: frontend-storage
           persistentVolumeClaim:
