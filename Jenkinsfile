@@ -1,125 +1,114 @@
 pipeline {
     agent any
 
-    parameters {
-        choice(name: 'ACTION', choices: ['BUILD', 'SCAN', 'PUSH', 'DEPLOY_SCALE'], description: 'Choose pipeline action')
-        string(name: 'IMAGE_TAG', defaultValue: '', description: 'Required only for SCAN/PUSH/DEPLOY')
-        string(name: 'REPLICA_COUNT', defaultValue: '1', description: 'Replica count for Deploy Scale')
+    environment {
+        IMAGE_TAG = "${env.BUILD_NUMBER}"
+        HARBOR_URL = "10.131.103.92:8090"
+        HARBOR_PROJECT = "kp2"
+        TRIVY_OUTPUT_JSON = "trivy-output.json"
     }
 
-    environment {
-        HARBOR_URL = "10.131.103.92:8090"
-        HARBOR_PROJECT = "kp_2"
+    parameters {
+        choice(name: 'ACTION', choices: ['full', 'scale'], description: 'Run full pipeline or only scale')
+        string(name: 'REPLICA_COUNT', defaultValue: '1', description: 'Replica count for frontend & backend')
     }
 
     stages {
 
         stage('Checkout') {
+            when { expression { params.ACTION == 'full' } }
             steps {
                 git 'https://github.com/ThanujaRatakonda/kp2.git'
             }
         }
 
-        /* =======================
-           1. BUILD
-           =======================*/
-        stage('Build Images') {
-            when {
-                anyOf {
-                    expression { params.ACTION == 'BUILD' }      // Run in full pipeline
-                    expression { params.ACTION == 'BUILD_ONLY' } // (optional)
-                }
-            }
+        stage('Build, Scan & Push Docker Images') {
+            when { expression { params.ACTION == 'full' } }
             steps {
                 script {
-                    env.IMAGE_TAG = env.BUILD_NUMBER
+                    def containers = [
+                        [name: "frontend", folder: "frontend"],
+                        [name: "backend", folder: "backend"]
+                    ]
 
-                    sh "docker build -t frontend:${IMAGE_TAG} ./frontend"
-                    sh "docker build -t backend:${IMAGE_TAG} ./backend"
-                }
-            }
-        }
+                    containers.each { c ->
 
-        /* =======================
-           2. SCAN
-           =======================*/
-        stage('Scan Images') {
-            when {
-                anyOf {
-                    expression { params.ACTION == 'BUILD' }  // include scan in full flow
-                    expression { params.ACTION == 'SCAN' }   // manual scan
-                }
-            }
-            steps {
-                script {
-                    def tag = (params.ACTION == 'BUILD') ? IMAGE_TAG : params.IMAGE_TAG
+                        def fullImage = "${HARBOR_URL}/${HARBOR_PROJECT}/${c.name}:${IMAGE_TAG}"
 
-                    ["frontend", "backend"].each { img ->
+                        echo "Building Docker image for ${c.name}..."
+                        sh "docker build -t ${c.name}:${IMAGE_TAG} ./${c.folder}"
+
+                        echo "Running Trivy scan for ${c.name}..."
                         sh """
-                            trivy image ${img}:${tag} \
-                                --severity CRITICAL,HIGH \
-                                --format json -o ${img}-scan.json
+                            trivy image ${c.name}:${IMAGE_TAG} \
+                            --severity CRITICAL,HIGH \
+                            --format json \
+                            -o ${TRIVY_OUTPUT_JSON}
                         """
-                        archiveArtifacts artifacts: "${img}-scan.json", fingerprint: true
-                    }
-                }
-            }
-        }
 
-        /* =======================
-           3. PUSH
-           =======================*/
-        stage('Push Images') {
-            when {
-                anyOf {
-                    expression { params.ACTION == 'BUILD' } // run in full flow
-                    expression { params.ACTION == 'PUSH' }  // manual push
-                }
-            }
-            steps {
-                script {
-                    def tag = (params.ACTION == 'BUILD') ? IMAGE_TAG : params.IMAGE_TAG
+                        archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true
 
-                    withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'U', passwordVariable: 'P')]) {
-                        sh "echo \$P | docker login ${HARBOR_URL} -u \$U --password-stdin"
+                        def vulnerabilities = sh(
+                            script: """
+                                jq '[.Results[] |
+                                     (.Vulnerabilities // [] | .[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH"))
+                                    ] | length' ${TRIVY_OUTPUT_JSON}
+                            """,
+                            returnStdout: true
+                        ).trim()
 
-                        ["frontend", "backend"].each { img ->
-                            def full = "${HARBOR_URL}/${HARBOR_PROJECT}/${img}:${tag}"
-                            sh "docker tag ${img}:${tag} ${full}"
-                            sh "docker push ${full}"
+                        if (vulnerabilities.toInteger() > 0) {
+                            error "CRITICAL/HIGH vulnerabilities found in ${c.name}!"
                         }
+
+                        withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
+                            sh "echo \$HARBOR_PASS | docker login ${HARBOR_URL} -u \$HARBOR_USER --password-stdin"
+                            sh "docker tag ${c.name}:${IMAGE_TAG} ${fullImage}"
+                            sh "docker push ${fullImage}"
+                        }
+
+                        sh "docker rmi ${c.name}:${IMAGE_TAG} || true"
                     }
                 }
             }
         }
 
-        /* =======================
-           4. DEPLOY + SCALE
-           =======================*/
-        stage('Deploy & Scale') {
-            when {
-                anyOf {
-                    expression { params.ACTION == 'BUILD' }        // include deploy in full flow
-                    expression { params.ACTION == 'DEPLOY_SCALE' } // manual deploy
-                }
-            }
+        stage('Apply Kubernetes Deployment') {
+            when { expression { params.ACTION == 'full' } }
             steps {
                 script {
-                    def tag = (params.ACTION == 'BUILD') ? IMAGE_TAG : params.IMAGE_TAG
-
+                    echo "Updating YAMLs with IMAGE_TAG..."
                     sh """
-                        sed -i 's/__IMAGE_TAG__/${tag}/g' k8s/frontenddeployment.yaml
-                        sed -i 's/__IMAGE_TAG__/${tag}/g' k8s/backenddeployment.yaml
+                        sed -i 's/__IMAGE_TAG__/${IMAGE_TAG}/g' k8s/frontenddeployment.yaml
+                        sed -i 's/__IMAGE_TAG__/${IMAGE_TAG}/g' k8s/backenddeployment.yaml
                     """
 
+                    echo "Deleting OLD deployments..."
+                    sh """
+                        kubectl delete deployment frontend --ignore-not-found
+                        kubectl delete deployment backend  --ignore-not-found
+                        kubectl delete deployment database --ignore-not-found
+
+                        kubectl delete service frontend --ignore-not-found
+                        kubectl delete service backend  --ignore-not-found
+                        kubectl delete service database --ignore-not-found
+                    """
+
+                    echo "Applying new deployments..."
                     sh "kubectl apply -f k8s/"
+                }
+            }
+        }
 
-                    sh """
-                        kubectl scale deployment frontend --replicas=${params.REPLICA_COUNT}
-                        kubectl scale deployment backend --replicas=${params.REPLICA_COUNT}
-                    """
+        stage('Scale Deployments') {
+            // This stage ALWAYS runs (both full & scale)
+            steps {
+                script {
+                    sh "kubectl scale deployment frontend --replicas=${params.REPLICA_COUNT}"
+                    sh "kubectl scale deployment backend  --replicas=${params.REPLICA_COUNT}"
 
-                    sh "kubectl get deploy"
+                    echo "Deployment Status:"
+                    sh "kubectl get deployments"
                 }
             }
         }
