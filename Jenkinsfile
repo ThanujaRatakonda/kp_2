@@ -9,21 +9,31 @@ pipeline {
     }
 
     parameters {
+        choice(
+            name: 'ACTION',
+            choices: ['FULL_PIPELINE', 'SCALE_ONLY'],
+            description: 'Choose FULL_PIPELINE or SCALE_ONLY'
+        )
         string(name: 'REPLICA_COUNT', defaultValue: '1', description: 'Replica count for frontend & backend')
     }
 
     stages {
 
+        /* ---------------------------------------------- */
+        /* CHECKOUT                                       */
+        /* ---------------------------------------------- */
         stage('Checkout') {
+            when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
                 git 'https://github.com/ThanujaRatakonda/kp2.git'
             }
         }
 
         /* ---------------------------------------------- */
-        /*     1. BUILD DOCKER IMAGES                     */
+        /* 1. BUILD DOCKER IMAGES                         */
         /* ---------------------------------------------- */
         stage('Build Docker Images') {
+            when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
                 script {
                     def containers = [
@@ -40,9 +50,10 @@ pipeline {
         }
 
         /* ---------------------------------------------- */
-        /*     2. SCAN DOCKER IMAGES USING TRIVY          */
+        /* 2. SCAN DOCKER IMAGES                          */
         /* ---------------------------------------------- */
         stage('Scan Docker Images') {
+            when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
                 script {
                     def containers = ["frontend", "backend"]
@@ -75,9 +86,10 @@ pipeline {
         }
 
         /* ---------------------------------------------- */
-        /*     3. PUSH IMAGES TO HARBOR                   */
+        /* 3. PUSH IMAGES TO HARBOR                       */
         /* ---------------------------------------------- */
         stage('Push Images to Harbor') {
+            when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
                 script {
                     def containers = ["frontend", "backend"]
@@ -99,10 +111,10 @@ pipeline {
         }
 
         /* ---------------------------------------------- */
-        /*     DEPLOYMENTS + SCALING                      */
+        /* APPLY K8s DEPLOYMENT                           */
         /* ---------------------------------------------- */
-
         stage('Apply Kubernetes Deployment') {
+            when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
                 script {
                     sh """
@@ -125,9 +137,14 @@ pipeline {
             }
         }
 
+        /* ---------------------------------------------- */
+        /* SCALE DEPLOYMENTS (ALWAYS RUNS)                */
+        /* ---------------------------------------------- */
         stage('Scale Deployments') {
             steps {
                 script {
+                    echo "Scaling replicas to ${params.REPLICA_COUNT}"
+
                     sh "kubectl scale deployment frontend --replicas=${params.REPLICA_COUNT}"
                     sh "kubectl scale deployment backend  --replicas=${params.REPLICA_COUNT}"
 
@@ -137,3 +154,4 @@ pipeline {
         }
     }
 }
+
