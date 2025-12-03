@@ -22,7 +22,7 @@ spec:
     - ReadWriteOnce
   storageClassName: local-storage
   hostPath:
-    path: /data/postgres     # Folder on your VM
+    path: /data/postgres
     type: DirectoryOrCreate
 
 ---
@@ -70,7 +70,7 @@ spec:
               value: "usersdb"
           volumeMounts:
             - name: pgdata
-              mountPath: /var/lib/postgresql/data     # Actual DB folder
+              mountPath: /var/lib/postgresql/data 
       volumes:
         - name: pgdata
           persistentVolumeClaim:
