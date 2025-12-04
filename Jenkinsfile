@@ -3,7 +3,7 @@ pipeline {
     environment {
         IMAGE_TAG = "${env.BUILD_NUMBER}"
         HARBOR_URL = "10.131.103.92:8090"
-        HARBOR_PROJECT = "kp2"
+        HARBOR_PROJECT = "kp_2"
         TRIVY_OUTPUT_JSON = "trivy-output.json"
     }
     parameters {
@@ -19,7 +19,7 @@ pipeline {
         stage('Checkout') {
             when { expression { params.ACTION == 'FULL_PIPELINE' } }
             steps {
-                git 'https://github.com/ThanujaRatakonda/kp2.git'
+                git 'https://github.com/ThanujaRatakonda/kp_2.git'
             }
         }
         stage('Build Docker Images') {
